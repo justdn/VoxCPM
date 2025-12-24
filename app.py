@@ -15,16 +15,47 @@ import voxcpm
 
 class VoxCPMDemo:
     def __init__(self) -> None:
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"🚀 Running on device: {self.device}")
+        # 设备检测优先级: CUDA > MPS > CPU
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
+
+        # 添加设备类型信息显示
+        device_info = {
+            "cuda": "NVIDIA GPU (CUDA)",
+            "mps": "Apple Silicon GPU (MPS)",
+            "cpu": "CPU"
+        }
+        print(f"🚀 Running on device: {self.device} ({device_info.get(self.device, 'Unknown')})")
+
+        # 显示额外设备信息
+        if self.device == "cuda":
+            print(f"📊 GPU Count: {torch.cuda.device_count()}")
+            if torch.cuda.is_available():
+                print(f"🎯 GPU Name: {torch.cuda.get_device_name(0)}")
+                print(f"💾 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        elif self.device == "mps":
+            print("🍎 Apple Silicon GPU detected - Using Metal Performance Shaders")
+            print("💡 Note: MPS provides efficient GPU acceleration on Apple Silicon devices")
 
         # ASR model for prompt text recognition
         self.asr_model_id = "iic/SenseVoiceSmall"
+        # 根据 self.device 设置 ASR 模型设备
+        if self.device == "cuda":
+            asr_device = "cuda:0"
+        elif self.device == "mps":
+            asr_device = "mps"
+        else:
+            asr_device = "cpu"
+
         self.asr_model: Optional[AutoModel] = AutoModel(
             model=self.asr_model_id,
             disable_update=True,
             log_level='DEBUG',
-            device="cuda:0" if self.device == "cuda" else "cpu",
+            device=asr_device,
         )
 
         # TTS model (lazy init)
@@ -63,8 +94,22 @@ class VoxCPMDemo:
         print("Model not loaded, initializing...")
         model_dir = self._resolve_model_dir()
         print(f"Using model dir: {model_dir}")
-        self.voxcpm_model = voxcpm.VoxCPM(voxcpm_model_path=model_dir)
-        print("Model loaded successfully.")
+
+        try:
+            # 官方推荐方案：不传递 device 参数，让官方代码自动检测
+            # 仅禁用 denoiser 以避免 transformers 兼容性问题
+            # 仅在 CUDA 上启用 torch.compile 优化
+            optimize = (self.device == "cuda")
+            self.voxcpm_model = voxcpm.VoxCPM(
+                voxcpm_model_path=model_dir,
+                enable_denoiser=False,
+                optimize=optimize
+            )
+        except Exception as e:
+            print(f"Error initializing VoxCPM: {e}")
+            raise
+
+        print("✅ Model loaded successfully.")
         return self.voxcpm_model
 
     # ---------- Functional endpoints ----------
@@ -99,6 +144,12 @@ class VoxCPMDemo:
         prompt_text = prompt_text_input if prompt_text_input else None
 
         print(f"Generating audio for text: '{text[:60]}...'")
+        
+        # 在 MPS 设备上禁用 denoise 以避免兼容性问题
+        if self.device == "mps":
+            denoise = False
+            print("💡 Note: Denoise disabled on MPS device for compatibility")
+        
         wav = current_model.generate(
             text=text,
             prompt_text=prompt_text,
